@@ -78,6 +78,8 @@ class RunSummary:
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
     errors: list[str] = field(default_factory=list)
+    truncated_by_limit: bool = False
+    cursor_advanced: bool = False
 
     def as_dict(self) -> dict:
         elapsed = None
@@ -91,5 +93,7 @@ class RunSummary:
             "files_unchanged": self.files_unchanged,
             "chunks_written": self.chunks_written,
             "elapsed_seconds": elapsed,
+            "truncated_by_limit": self.truncated_by_limit,
+            "cursor_advanced": self.cursor_advanced,
             "errors": self.errors[:20],
         }

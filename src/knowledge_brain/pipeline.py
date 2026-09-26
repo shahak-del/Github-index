@@ -226,7 +226,7 @@ def run_sync(
 
     summary.files_discovered = len(candidate_entries)
 
-    to_process: list[DropboxEntry] = []
+    needs_indexing: list[DropboxEntry] = []
     for entry in candidate_entries:
         if entry.extension not in SUPPORTED_EXTENSIONS:
             summary.files_skipped += 1
@@ -234,25 +234,44 @@ def run_sync(
         if not _entry_needs_indexing(entry, checkpoint):
             summary.files_unchanged += 1
             continue
-        to_process.append(entry)
+        needs_indexing.append(entry)
 
-    if limit is not None:
-        to_process = to_process[:limit]
+    truncated = limit is not None and limit < len(needs_indexing)
+    to_process = needs_indexing[:limit] if limit is not None else needs_indexing
+    summary.truncated_by_limit = truncated
 
     if dry_run:
         summary.finished_at = datetime.now(timezone.utc)
         return summary
 
-    # Deletions (only relevant for incremental syncs).
-    if qdrant is not None:
-        for path in deleted_paths:
-            file_id = checkpoint.find_file_id_by_path(path)
-            if file_id:
-                qdrant.delete_by_file_id(settings.qdrant_collection, file_id)
-                checkpoint.remove_file_state(file_id)
+    qdrant = qdrant or QdrantStore(
+        settings.qdrant_url.get_secret_value(), settings.qdrant_api_key.get_secret_value()
+    )
 
-    if not to_process:
+    # Deletions (only relevant for incremental syncs). Always applied in
+    # full, regardless of --limit, since removals are cheap/idempotent and
+    # unrelated to the file-processing cap.
+    for path in deleted_paths:
+        file_id = checkpoint.find_file_id_by_path(path)
+        if file_id:
+            qdrant.delete_by_file_id(settings.qdrant_collection, file_id)
+            checkpoint.remove_file_state(file_id)
+
+    # IMPORTANT: never advance the cursor past work this run didn't actually
+    # do. If --limit truncated the batch, the cursor stays put so the next
+    # `sync` call re-fetches the same candidates (already-indexed ones are
+    # then skipped as "unchanged" in O(1) checkpoint lookups) until a run
+    # completes untruncated -- otherwise a sample run would silently mark
+    # the rest of the archive as "already synced" and an incremental sync
+    # would never pick it up.
+    if truncated:
+        summary.cursor_advanced = False
+        if not to_process:
+            summary.finished_at = datetime.now(timezone.utc)
+            return summary
+    elif not to_process:
         checkpoint.set_cursor(new_cursor)
+        summary.cursor_advanced = True
         summary.finished_at = datetime.now(timezone.utc)
         return summary
 
@@ -260,9 +279,6 @@ def run_sync(
         settings.embedding_provider,
         settings.embedding_model,
         settings.embedding_api_key.get_secret_value() if settings.embedding_api_key else None,
-    )
-    qdrant = qdrant or QdrantStore(
-        settings.qdrant_url.get_secret_value(), settings.qdrant_api_key.get_secret_value()
     )
     qdrant.ensure_collection(settings.qdrant_collection, embedder.dimension)
 
@@ -306,7 +322,9 @@ def run_sync(
             summary.files_processed += 1
             summary.chunks_written += len(chunks)
 
-    checkpoint.set_cursor(new_cursor)
+    if not truncated:
+        checkpoint.set_cursor(new_cursor)
+        summary.cursor_advanced = True
     summary.finished_at = datetime.now(timezone.utc)
     return summary
 

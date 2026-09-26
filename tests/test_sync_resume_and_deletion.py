@@ -72,6 +72,58 @@ def test_dry_run_makes_no_writes(tmp_path: Path):
     checkpoint.close()
 
 
+def test_limit_truncation_does_not_advance_cursor(tmp_path: Path):
+    """A --limit sample run must not mark the whole archive as synced.
+
+    If it advanced the stored cursor to "latest" after only processing a
+    handful of files, a later incremental sync would never pick up the
+    files that were skipped by the limit -- they'd look like they existed
+    before the cursor and were already handled.
+    """
+    settings = _settings(tmp_path)
+    entries = [
+        make_entry(path=f"/Projects/Alpha/f{i}.txt", file_id=f"id:{i}", rev="r1", content_hash="h1")
+        for i in range(5)
+    ]
+    contents = {e.path_lower: f"content for file {i} ".encode() * 10 for i, e in enumerate(entries)}
+    dbx = FakeDropboxClient(entries, contents)
+    qdrant = FakeQdrantStore()
+    embedder = FakeEmbeddingClient()
+    checkpoint = CheckpointStore(settings.checkpoint_db_path)
+
+    # Sample run: only 2 of the 5 discovered files get processed.
+    summary = run_sync(
+        settings, checkpoint, limit=2, dbx=dbx, qdrant=qdrant, embedder=embedder, incremental=False
+    )
+    assert summary.files_processed == 2
+    assert summary.truncated_by_limit is True
+    assert summary.cursor_advanced is False
+    assert checkpoint.get_cursor() is None
+    assert checkpoint.file_count() == 2
+
+    # A second sample run continues from where the first left off instead
+    # of re-processing the same 2 files or skipping the remaining 3.
+    summary2 = run_sync(
+        settings, checkpoint, limit=2, dbx=dbx, qdrant=qdrant, embedder=embedder, incremental=False
+    )
+    assert summary2.files_unchanged == 2  # the first 2, already indexed
+    assert summary2.files_processed == 2  # 2 more of the remaining 3
+    assert summary2.cursor_advanced is False
+    assert checkpoint.file_count() == 4
+
+    # A final untruncated run finishes the rest and only now advances the cursor.
+    summary3 = run_sync(
+        settings, checkpoint, dbx=dbx, qdrant=qdrant, embedder=embedder, incremental=False
+    )
+    assert summary3.files_processed == 1
+    assert summary3.truncated_by_limit is False
+    assert summary3.cursor_advanced is True
+    assert checkpoint.get_cursor() == "cursor-1"
+    assert checkpoint.file_count() == 5
+
+    checkpoint.close()
+
+
 def test_incremental_sync_handles_deletion(tmp_path: Path):
     settings = _settings(tmp_path)
     entry1 = make_entry(path="/Projects/Alpha/keep.txt", file_id="id:1", rev="r1", content_hash="h1")

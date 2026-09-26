@@ -54,10 +54,14 @@ docker compose run --rm knowledge-brain doctor
   checkpointed in `state/checkpoint.sqlite3`; unchanged files are skipped
   on rerun. If a file shrinks, trailing stale chunks from the old, longer
   version are deleted.
-- **Incremental sync.** A Dropbox delta cursor is persisted after every
-  run; subsequent `sync` calls fetch only additions/changes/deletions.
-  Deletions remove only the corresponding Qdrant points, never anything
-  in Dropbox.
+- **Incremental sync.** A Dropbox delta cursor is persisted only after a
+  run finishes *without* being cut short by `--limit`; subsequent `sync`
+  calls then fetch only additions/changes/deletions. This means a `--limit`
+  sample run never silently marks the untouched rest of the archive as
+  "already synced" — rerunning `sync` (with or without `--limit`) picks up
+  exactly where the last run left off, until one pass completes untruncated
+  and the cursor advances. Deletions remove only the corresponding Qdrant
+  points, never anything in Dropbox.
 - **Collection creation is deferred** until the embedding client is
   built and its vector dimension is known (`qdrant_store.ensure_collection`).
 - **Secrets** are wrapped in `pydantic.SecretStr` and redacted from all
